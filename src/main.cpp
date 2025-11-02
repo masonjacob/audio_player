@@ -2,7 +2,12 @@
 #include "DFRobotDFPlayerMini.h"
 #include "EasyButton.h"
 #include <ctype.h>
-// #include <EEPROM.h>
+#include <FlashStorage_SAMD.h>
+
+#define DEFAULT_VOLUME 20  // Default volume if EEPROM is empty
+
+// FlashStorage_SAMD object to hold a single uint8_t volume value
+FlashStorage(volumeFlash, uint8_t);
 
 // Board-specific serial port configurations
 #ifdef BOARD_SEEED_XIAO
@@ -40,9 +45,9 @@ struct TrackMapping
 };
 
 // Maximum number of tracks in each folder
-#define NUM_UI_FILES 8     // Number of files in UI folder (01)
-#define NUM_VOICE_FILES 1  // Number of files in Voice folder (02)
-#define NUM_MUSIC_FILES 4  // Number of files in Music folder (03)
+#define NUM_UI_FILES 9      // Number of files in UI folder (01)
+#define NUM_VOICE_FILES 1   // Number of files in Voice folder (02)
+#define NUM_MUSIC_FILES 4   // Number of files in Music folder (03)
 #define NUM_CANDIDS_FILES 1 // Number of files in Candids folder (04)
 
 #define BAUDRATE 115200
@@ -73,20 +78,202 @@ const TrackMapping SOUNDS[NUM_UI_FILES] = {
     {"voice_mode", 5},
     {"candids_mode", 6},
     {"settings_mode", 7},
-    {"tone3", 8} // Placeholder for future use
-  };
+    {"tone3", 8}, // Placeholder for future use
+    {"favorites_mode", 9}};
 
+enum Mode
+{
+  MODE_FAVORITES,
+  MODE_VOICE,
+  MODE_MUSIC,
+  MODE_CANDIDS,
+  MODE_SETTINGS
+};
+
+Mode currentMode = MODE_FAVORITES;
+Mode previousMode = MODE_FAVORITES; // used when entering/exiting config
+
+int lastPlayedTrack = -1; // last DFPlayer.play() track number
+bool isPlaying = false;
+
+// Favorites mapping: one clip per physical button when in MODE_FAVORITES.
+// Assumption: map to the first three tracks in the Music folder by default.
+struct FavoriteMapping
+{
+  uint8_t folder;
+  uint8_t track;
+};
+
+const FavoriteMapping FAVORITES[3] = {
+    {Music, 1},
+    {Music, 2},
+    {Music, 3}};
 
 DFRobotDFPlayerMini DFPlayer;
-void printDetail(uint8_t type, int value);
-void handleSerialCommands();
 
-// Instance of the button.
 EasyButton button1(BUTTON_1_PIN);
 EasyButton button2(BUTTON_2_PIN);
 EasyButton button3(BUTTON_3_PIN);
 
-// Helper functions for track lookup
+void printDetail(uint8_t type, int value);
+void handleSerialCommands();
+int findSoundTrack(const char *name);
+int getTrackFromArray(const TrackMapping *array, int maxSize, int index);
+void playFolderTrack(uint8_t folder, uint8_t track);
+void playUISound(const char *name);
+void playRandomFromFolder(uint8_t folder, uint8_t maxTracks);
+void enterSettingsMode();
+void exitSettingsMode();
+void playRandomTrack();
+void changePlaybackMode();
+void replayLastTrack();
+void playFavorite(int idx);
+void togglePlayPause();
+void toggleSettingsMode();
+void increaseVolume();
+void decreaseVolume();
+void button1ISR();
+void button1Pressed();
+void button1longPressed();
+void button2ISR();
+void button2Pressed();
+void button3ISR();
+void button3Pressed();
+void button3longPressed();
+void saveVolumeToEEPROM(uint8_t volume);
+uint8_t loadVolumeFromEEPROM();
+
+void setup()
+{
+  // Initialize USB serial for debugging
+  USBSerial.begin(USB_SERIAL_BAUD);
+  // USBSerial.println(F("Initializing..."));
+
+  FPSerial.begin(FP_SERIAL_BAUD); // Hardware serial for DFPlayer
+
+  // USBSerial.println(F("Serial ports initialized"));
+  // Serial.println(F("DFRobot DFPlayer Mini Demo"));
+  // Serial.println(F("Initializing DFPlayer ... (May take 3~5 seconds)"));
+
+  if (!DFPlayer.begin(FPSerial, /*isACK = */ true, /*doReset = */ true))
+  { // Use serial to communicate with mp3.
+    USBSerial.println(F("Unable to begin:"));
+    while (true)
+      ;
+  }
+  USBSerial.println(F("DFPlayer Mini online."));
+
+  DFPlayer.setTimeOut(1000); // Set serial communictaion time out 500ms
+
+  //----Set volume from EEPROM----
+  uint8_t savedVolume = loadVolumeFromEEPROM();
+  DFPlayer.volume(savedVolume); // Set volume value (0~30)
+
+  DFPlayer.EQ(DFPLAYER_EQ_NORMAL);
+
+  DFPlayer.outputDevice(DFPLAYER_DEVICE_SD);
+
+  //  DFPlayer.sleep();     //sleep
+  //  DFPlayer.reset();     //Reset the module
+  //  DFPlayer.enableDAC();  //Enable On-chip DAC
+  //  DFPlayer.disableDAC();  //Disable On-chip DAC
+  //  DFPlayer.outputSetting(true, 15); //output setting, enable the output and set the gain to 15
+
+  // Initialize the buttons
+  button1.begin();
+  button1.onPressed(button1Pressed);
+  button1.onPressedFor(1000, button1longPressed);
+  // button1.onSequence(2, 500, playRandomTrack); // Double click with 500ms timeout
+
+  button2.begin();
+  button2.onPressed(button2Pressed);
+  // button2.onPressedFor(1000, playRandomTrack);
+  // button2.onSequence(2, 500, replayLastTrack); // Double click with 500ms timeout
+
+  button3.begin();
+  button3.onPressed(button3Pressed);
+  button3.onPressedFor(1000, button3longPressed);
+
+  // Play startup sound from UI folder
+  playUISound("startup");
+  delay(5000);
+  playUISound("favorites_mode");
+  delay(100);
+}
+
+void loop()
+{
+  button1.read();
+  button2.read();
+  button3.read();
+}
+
+void printDetail(uint8_t type, int value)
+{
+  switch (type)
+  {
+  case TimeOut:
+    // Serial.println(F("Time Out!"));
+    break;
+  case WrongStack:
+    // Serial.println(F("Stack Wrong!"));
+    break;
+  case DFPlayerCardInserted:
+    // Serial.println(F("Card Inserted!"));
+    break;
+  case DFPlayerCardRemoved:
+    // Serial.println(F("Card Removed!"));
+    break;
+  case DFPlayerCardOnline:
+    // Serial.println(F("Card Online!"));
+    break;
+  case DFPlayerUSBInserted:
+    // Serial.println("USB Inserted!");
+    break;
+  case DFPlayerUSBRemoved:
+    // Serial.println("USB Removed!");
+    break;
+  case DFPlayerPlayFinished:
+    Serial.print(F("Number:"));
+    Serial.print(value);
+    // Serial.println(F(" Play Finished!"));
+    break;
+  case DFPlayerError:
+    Serial.print(F("DFPlayerError:"));
+    switch (value)
+    {
+    case Busy:
+      // Serial.println(F("Card not found"));
+      break;
+    case Sleeping:
+      // Serial.println(F("Sleeping"));
+      break;
+    case SerialWrongStack:
+      // Serial.println(F("Get Wrong Stack"));
+      break;
+    case CheckSumNotMatch:
+      // Serial.println(F("Check Sum Not Match"));
+      break;
+    case FileIndexOut:
+      // Serial.println(F("File Index Out of Bound"));
+      break;
+    case FileMismatch:
+      // Serial.println(F("Cannot Find File"));
+      break;
+    case Advertise:
+      // Serial.println(F("In Advertise"));
+      break;
+    default:
+      break;
+    }
+    break;
+  default:
+    break;
+  }
+}
+
+// -- Function implementations moved here --
+
 int findSoundTrack(const char *name)
 {
   for (int i = 0; i < NUM_UI_FILES; i++)
@@ -108,19 +295,18 @@ int getTrackFromArray(const TrackMapping *array, int maxSize, int index)
   return -1;
 }
 
-enum Mode
+// Play the favorite indexed by button (0..2). Safe no-op if mapping invalid.
+void playFavorite(int idx)
 {
-  MODE_VOICE,
-  MODE_MUSIC,
-  MODE_CANDIDS,
-  MODE_SETTINGS
-};
-
-Mode currentMode = MODE_VOICE;
-Mode previousMode = MODE_VOICE; // used when entering/exiting config
-
-int lastPlayedTrack = -1; // last DFPlayer.play() track number
-bool isPlaying = false;
+  if (idx < 0 || idx >= 3)
+    return;
+  uint8_t folder = FAVORITES[idx].folder;
+  uint8_t track = FAVORITES[idx].track;
+  if (folder > 0 && track > 0)
+  {
+    playFolderTrack(folder, track);
+  }
+}
 
 // Play a track from a specific folder
 void playFolderTrack(uint8_t folder, uint8_t track)
@@ -175,6 +361,9 @@ void exitSettingsMode()
   // play menu close sound if defined
   switch (currentMode)
   {
+  case MODE_FAVORITES:
+    playUISound("favorites_mode");
+    break;
   case MODE_VOICE:
     playUISound("voice_mode");
     break;
@@ -213,6 +402,11 @@ void changePlaybackMode()
   // Toggle between modes on long press
   switch (currentMode)
   {
+  case MODE_FAVORITES:
+    currentMode = MODE_VOICE;
+    // Serial.println(F("Switched to VOICE mode"));
+    playUISound("voice_mode");
+    break;
   case MODE_VOICE:
     currentMode = MODE_MUSIC;
     // Serial.println(F("Switched to MUSIC mode"));
@@ -224,9 +418,9 @@ void changePlaybackMode()
     playUISound("candids_mode");
     break;
   case MODE_CANDIDS:
-    currentMode = MODE_VOICE;
-    // Serial.println(F("Switched to VOICE mode"));
-    playUISound("voice_mode");
+    currentMode = MODE_FAVORITES;
+    // Serial.println(F("Switched to FAVORITES mode"));
+    playUISound("favorites_mode");
     break;
   default:
     break;
@@ -305,14 +499,24 @@ void toggleSettingsMode()
 
 void increaseVolume()
 {
-  DFPlayer.volumeUp();
-  playFolderTrack(UI, 8); // Play tone1 as feedback
+  uint8_t currentVolume = loadVolumeFromEEPROM();
+  if (currentVolume < 30) {
+    currentVolume++;
+    DFPlayer.volume(currentVolume);
+    saveVolumeToEEPROM(currentVolume);
+    playFolderTrack(UI, 8); // Play tone1 as feedback
+  }
 }
 
 void decreaseVolume()
 {
-  DFPlayer.volumeDown();
-  playFolderTrack(UI, 8); // Play tone2 as feedback
+  uint8_t currentVolume = loadVolumeFromEEPROM();
+  if (currentVolume > 0) {
+    currentVolume--;
+    DFPlayer.volume(currentVolume);
+    saveVolumeToEEPROM(currentVolume);
+    playFolderTrack(UI, 8); // Play tone2 as feedback
+  }
 }
 
 void button1ISR()
@@ -322,12 +526,20 @@ void button1ISR()
 
 void button1Pressed()
 {
-  if (currentMode != MODE_SETTINGS)
+  if (currentMode == MODE_SETTINGS)
   {
-    playRandomTrack();
-  } else {
     increaseVolume();
+    return;
   }
+
+  if (currentMode == MODE_FAVORITES)
+  {
+    playFavorite(0);
+    return;
+  }
+
+  // Default behavior for other non-settings modes
+  playRandomTrack();
 }
 
 void button1longPressed()
@@ -342,12 +554,20 @@ void button2ISR()
 
 void button2Pressed()
 {
-  if (currentMode != MODE_SETTINGS)
+  if (currentMode == MODE_SETTINGS)
   {
-    replayLastTrack();
-  } else {
     decreaseVolume();
+    return;
   }
+
+  if (currentMode == MODE_FAVORITES)
+  {
+    playFavorite(1);
+    return;
+  }
+
+  // Default behavior for other non-settings modes
+  replayLastTrack();
 }
 
 void button3ISR()
@@ -357,6 +577,21 @@ void button3ISR()
 
 void button3Pressed()
 {
+  // Button 3 single press behavior varies by mode.
+  if (currentMode == MODE_SETTINGS)
+  {
+    // In settings mode, keep existing play/pause mapping (togglePlayPause will no-op if inappropriate)
+    togglePlayPause();
+    return;
+  }
+
+  if (currentMode == MODE_FAVORITES)
+  {
+    playFavorite(2);
+    return;
+  }
+
+  // Default: toggle play/pause
   togglePlayPause();
 }
 
@@ -365,99 +600,19 @@ void button3longPressed()
   toggleSettingsMode();
 }
 
-void setup()
-{
-  // Initialize USB serial for debugging
-  USBSerial.begin(USB_SERIAL_BAUD);
-  // USBSerial.println(F("Initializing..."));
-
-  FPSerial.begin(FP_SERIAL_BAUD); // Hardware serial for DFPlayer
-
-  // USBSerial.println(F("Serial ports initialized"));
-  // Serial.println(F("DFRobot DFPlayer Mini Demo"));
-  // Serial.println(F("Initializing DFPlayer ... (May take 3~5 seconds)"));
-
-  if (!DFPlayer.begin(FPSerial, /*isACK = */ true, /*doReset = */ true))
-  { // Use serial to communicate with mp3.
-    USBSerial.println(F("Unable to begin:"));
-    while (true);
-  }
-  USBSerial.println(F("DFPlayer Mini online."));
-
-  DFPlayer.setTimeOut(1000); // Set serial communictaion time out 500ms
-
-  //----Set volume----
-  DFPlayer.volume(30); // Set volume value (0~30).
-
-  DFPlayer.EQ(DFPLAYER_EQ_NORMAL);
-
-  DFPlayer.outputDevice(DFPLAYER_DEVICE_SD);
-
-  //  DFPlayer.sleep();     //sleep
-  //  DFPlayer.reset();     //Reset the module
-  //  DFPlayer.enableDAC();  //Enable On-chip DAC
-  //  DFPlayer.disableDAC();  //Disable On-chip DAC
-  //  DFPlayer.outputSetting(true, 15); //output setting, enable the output and set the gain to 15
-
-  // Initialize the buttons
-  button1.begin();
-  button1.onPressed(button1Pressed);
-  button1.onPressedFor(1000, button1longPressed);
-  // button1.onSequence(2, 500, playRandomTrack); // Double click with 500ms timeout
-
-  button2.begin();
-  button2.onPressed(button2Pressed);
-  // button2.onPressedFor(1000, playRandomTrack);
-  // button2.onSequence(2, 500, replayLastTrack); // Double click with 500ms timeout
-
-  button3.begin();
-  button3.onPressed(button3Pressed);
-  button3.onPressedFor(1000, button3longPressed);
-
-  if (button1.supportsInterrupt())
-  {
-    // Avoid enabling hardware interrupts for EasyButton here.
-    // Calling button.read() (and the registered onPressed callbacks) from an ISR
-    // can cause the callbacks to run in interrupt context. Those callbacks
-    // perform DFPlayer/Serial operations which are blocking and not safe inside
-    // an ISR, causing the program to freeze. We will use polling in loop()
-    // (button.update()) which runs in the main context and is safe.
-    // button1.enableInterrupt(button1ISR);
-    // USBSerial.println("Button will be used through interrupts");
-  }
-
-  if (button2.supportsInterrupt())
-  {
-    // See note above: do not enable interrupts to avoid running callbacks
-    // (which call DFPlayer/Serial) inside an ISR. Use polling via update().
-    // button2.enableInterrupt(button2ISR);
-    // USBSerial.println("Button will be used through interrupts");
-  }
-
-  if (button3.supportsInterrupt())
-  {
-    // See note above for button1/button2.
-    // button3.enableInterrupt(button3ISR);
-    // USBSerial.println("Button will be used through interrupts");
-  }
-  // Play startup sound from UI folder
-  playUISound("startup");
-  delay(100);
+void saveVolumeToEEPROM(uint8_t volume) {
+  // Write the volume to flash storage. FlashStorage_SAMD handles wear-leveling internally.
+  volumeFlash.write(volume);
 }
 
-void loop()
-{
-  button1.read();
-  button2.read();
-  button3.read();
-  // button1.update();
-  // button2.update();
-  // button3.update();
-  // handleSerialCommands();
-  // if (DFPlayer.available())
-  // {
-  //   printDetail(DFPlayer.readType(), DFPlayer.read()); // Print the detail message from DFPlayer to handle different errors and states.
-  // }
+uint8_t loadVolumeFromEEPROM() {
+  // Read the saved value from flash. If uninitialized or out of range, return DEFAULT_VOLUME.
+  uint8_t volume;
+  volumeFlash.read(volume);
+  if (volume > 30) {
+    return DEFAULT_VOLUME;
+  }
+  return volume;
 }
 
 // Serial command handling moved out of loop() for clarity
@@ -559,6 +714,7 @@ void handleSerialCommands()
             if (v > 30)
               v = 30;
             DFPlayer.volume(v);
+            saveVolumeToEEPROM(v);
             Serial.print(F("CMD: volume "));
             // Serial.println(v);
           }
@@ -570,13 +726,13 @@ void handleSerialCommands()
         // volup
         else if (strcmp(token, "volup") == 0 || strcmp(token, "volumeup") == 0)
         {
-          DFPlayer.volumeUp();
+          increaseVolume();
           // Serial.println(F("CMD: volumeUp"));
         }
         // voldown
         else if (strcmp(token, "voldown") == 0 || strcmp(token, "volumedown") == 0)
         {
-          DFPlayer.volumeDown();
+          decreaseVolume();
           // Serial.println(F("CMD: volumeDown"));
         }
         // eq <normal|pop|rock|jazz|classic|bass>
@@ -665,77 +821,5 @@ void handleSerialCommands()
         }
       }
     }
-  }
-}
-
-//----Read imformation----
-// Serial.println(DFPlayer.readState()); //read mp3 state
-// Serial.println(DFPlayer.readVolume()); //read current volume
-// Serial.println(DFPlayer.readEQ()); //read EQ setting
-// Serial.println(DFPlayer.readFileCounts()); //read all file counts in SD card
-// Serial.println(DFPlayer.readCurrentFileNumber()); //read current play file number
-// Serial.println(DFPlayer.readFileCountsInFolder(3)); //read file counts in folder SD:/03
-
-void printDetail(uint8_t type, int value)
-{
-  switch (type)
-  {
-  case TimeOut:
-    // Serial.println(F("Time Out!"));
-    break;
-  case WrongStack:
-    // Serial.println(F("Stack Wrong!"));
-    break;
-  case DFPlayerCardInserted:
-    // Serial.println(F("Card Inserted!"));
-    break;
-  case DFPlayerCardRemoved:
-    // Serial.println(F("Card Removed!"));
-    break;
-  case DFPlayerCardOnline:
-    // Serial.println(F("Card Online!"));
-    break;
-  case DFPlayerUSBInserted:
-    // Serial.println("USB Inserted!");
-    break;
-  case DFPlayerUSBRemoved:
-    // Serial.println("USB Removed!");
-    break;
-  case DFPlayerPlayFinished:
-    Serial.print(F("Number:"));
-    Serial.print(value);
-    // Serial.println(F(" Play Finished!"));
-    break;
-  case DFPlayerError:
-    Serial.print(F("DFPlayerError:"));
-    switch (value)
-    {
-    case Busy:
-      // Serial.println(F("Card not found"));
-      break;
-    case Sleeping:
-      // Serial.println(F("Sleeping"));
-      break;
-    case SerialWrongStack:
-      // Serial.println(F("Get Wrong Stack"));
-      break;
-    case CheckSumNotMatch:
-      // Serial.println(F("Check Sum Not Match"));
-      break;
-    case FileIndexOut:
-      // Serial.println(F("File Index Out of Bound"));
-      break;
-    case FileMismatch:
-      // Serial.println(F("Cannot Find File"));
-      break;
-    case Advertise:
-      // Serial.println(F("In Advertise"));
-      break;
-    default:
-      break;
-    }
-    break;
-  default:
-    break;
   }
 }
