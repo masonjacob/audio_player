@@ -146,7 +146,7 @@ uint8_t loadVolumeFromEEPROM();
 void setup()
 {
   // Initialize USB serial for debugging
-  USBSerial.begin(USB_SERIAL_BAUD);
+  // USBSerial.begin(USB_SERIAL_BAUD);
   // USBSerial.println(F("Initializing..."));
 
   FPSerial.begin(FP_SERIAL_BAUD); // Hardware serial for DFPlayer
@@ -157,16 +157,22 @@ void setup()
 
   if (!DFPlayer.begin(FPSerial, /*isACK = */ true, /*doReset = */ true))
   { // Use serial to communicate with mp3.
-    USBSerial.println(F("Unable to begin:"));
+    // USBSerial.println(F("Unable to begin:"));
     while (true)
       ;
   }
-  USBSerial.println(F("DFPlayer Mini online."));
+  // USBSerial.println(F("DFPlayer Mini online."));
 
   DFPlayer.setTimeOut(1000); // Set serial communictaion time out 500ms
 
   //----Set volume from EEPROM----
   uint8_t savedVolume = loadVolumeFromEEPROM();
+  if (savedVolume < 1 || savedVolume > 30)
+  {
+    savedVolume = DEFAULT_VOLUME;
+    saveVolumeToEEPROM(savedVolume);
+  }
+  
   DFPlayer.volume(savedVolume); // Set volume value (0~30)
 
   DFPlayer.EQ(DFPLAYER_EQ_NORMAL);
@@ -316,10 +322,10 @@ void playFolderTrack(uint8_t folder, uint8_t track)
   DFPlayer.playFolder(folder, track);
   lastPlayedTrack = track;
   isPlaying = true;
-  USBSerial.print(F("Playing folder "));
-  USBSerial.print(folder);
-  USBSerial.print(F(" track "));
-  USBSerial.println(track);
+  // USBSerial.print(F("Playing folder "));
+  // USBSerial.print(folder);
+  // USBSerial.print(F(" track "));
+  // USBSerial.println(track);
 }
 
 // Helper: play a track from UI sounds folder
@@ -398,7 +404,7 @@ void playRandomTrack()
 
 void changePlaybackMode()
 {
-  USBSerial.println("Button 1 long pressed");
+  // USBSerial.println("Button 1 long pressed");
   // Toggle between modes on long press
   switch (currentMode)
   {
@@ -464,7 +470,7 @@ void togglePlayPause()
   {
     DFPlayer.pause();
     isPlaying = false;
-    USBSerial.println(F("Paused"));
+    // USBSerial.println(F("Paused"));
   }
   else
   {
