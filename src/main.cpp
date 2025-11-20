@@ -47,7 +47,7 @@ struct TrackMapping
 // Maximum number of tracks in each folder
 #define NUM_UI_FILES 9      // Number of files in UI folder (01)
 #define NUM_VOICE_FILES 1   // Number of files in Voice folder (02)
-#define NUM_MUSIC_FILES 4   // Number of files in Music folder (03)
+#define NUM_MUSIC_FILES 32   // Number of files in Music folder (03)
 #define NUM_CANDIDS_FILES 1 // Number of files in Candids folder (04)
 
 #define BAUDRATE 115200
