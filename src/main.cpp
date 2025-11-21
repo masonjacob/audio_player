@@ -6,8 +6,15 @@
 
 #define DEFAULT_VOLUME 20  // Default volume if EEPROM is empty
 
-// FlashStorage_SAMD object to hold a single uint8_t volume value
-FlashStorage(volumeFlash, uint8_t);
+// Device settings stored in flash (FlashStorage_SAMD)
+struct DeviceSettings {
+  uint8_t volume;
+  uint8_t playbackOrderMode; // stores Mode as uint8_t
+  uint8_t reserved;
+};
+
+// Flash storage for the full settings struct
+FlashStorage(settingsFlash, DeviceSettings);
 
 // Board-specific serial port configurations
 #ifdef BOARD_SEEED_XIAO
@@ -45,7 +52,7 @@ struct TrackMapping
 };
 
 // Maximum number of tracks in each folder
-#define NUM_UI_FILES 9      // Number of files in UI folder (01)
+#define NUM_UI_FILES 13      // Number of files in UI folder (01)
 #define NUM_VOICE_FILES 1   // Number of files in Voice folder (02)
 #define NUM_MUSIC_FILES 32   // Number of files in Music folder (03)
 #define NUM_CANDIDS_FILES 1 // Number of files in Candids folder (04)
@@ -67,6 +74,12 @@ enum Folders
   Candids = 4 // Folder 04: Candid recordings
 };
 
+enum PlaybackOrderModes
+{
+  PLAYBACK_ORDER_MODE_SEQUENTIAL,
+  PLAYBACK_ORDER_MODE_RANDOM
+};
+
 // Sound effects array (UI sounds, named tracks)
 const TrackMapping SOUNDS[NUM_UI_FILES] = {
     // UI Sounds
@@ -79,7 +92,11 @@ const TrackMapping SOUNDS[NUM_UI_FILES] = {
     {"candids_mode", 6},
     {"settings_mode", 7},
     {"tone3", 8}, // Placeholder for future use
-    {"favorites_mode", 9}};
+    {"favorites_mode", 9},
+    {"settings_volume_mode", 10},
+    {"settings_playback_order_mode", 11},
+    {"sequential_playback", 12},
+    {"random_playback", 13}};
 
 enum Mode
 {
@@ -93,8 +110,20 @@ enum Mode
 Mode currentMode = MODE_FAVORITES;
 Mode previousMode = MODE_FAVORITES; // used when entering/exiting config
 
+// Settings submenu selection
+enum SettingsOption {
+  SET_VOLUME = 0,
+  SET_PLAYBACK_ORDER_MODE = 1,
+  SETTING_COUNT
+};
+
+SettingsOption currentSetting = SET_VOLUME;
+Mode settingsPlaybackMode = MODE_FAVORITES; // temporary selection while in settings
+
 int lastPlayedTrack = -1; // last DFPlayer.play() track number
 bool isPlaying = false;
+int currentPlaybackOrderMode = PLAYBACK_ORDER_MODE_SEQUENTIAL;
+int currentVolume = DEFAULT_VOLUME;
 
 // Favorites mapping: one clip per physical button when in MODE_FAVORITES.
 // Assumption: map to the first three tracks in the Music folder by default.
@@ -141,7 +170,9 @@ void button3ISR();
 void button3Pressed();
 void button3longPressed();
 void saveVolumeToEEPROM(uint8_t volume);
-uint8_t loadVolumeFromEEPROM();
+void savePlaybackOrderModeToEEPROM(uint8_t playbackOrderMode);
+void saveSettings();
+DeviceSettings loadSettings();
 
 void setup()
 {
@@ -166,24 +197,16 @@ void setup()
   DFPlayer.setTimeOut(1000); // Set serial communictaion time out 500ms
 
   //----Set volume from EEPROM----
-  uint8_t savedVolume = loadVolumeFromEEPROM();
-  if (savedVolume < 1 || savedVolume > 30)
-  {
-    savedVolume = DEFAULT_VOLUME;
-    saveVolumeToEEPROM(savedVolume);
-  }
+  DeviceSettings storedSettings = loadSettings();
+
+  currentVolume = storedSettings.volume;
+  currentPlaybackOrderMode = storedSettings.playbackOrderMode;
   
-  DFPlayer.volume(savedVolume); // Set volume value (0~30)
+  DFPlayer.volume(currentVolume); // Set volume value (0~30)
 
   DFPlayer.EQ(DFPLAYER_EQ_NORMAL);
 
   DFPlayer.outputDevice(DFPLAYER_DEVICE_SD);
-
-  //  DFPlayer.sleep();     //sleep
-  //  DFPlayer.reset();     //Reset the module
-  //  DFPlayer.enableDAC();  //Enable On-chip DAC
-  //  DFPlayer.disableDAC();  //Disable On-chip DAC
-  //  DFPlayer.outputSetting(true, 15); //output setting, enable the output and set the gain to 15
 
   // Initialize the buttons
   button1.begin();
@@ -356,12 +379,15 @@ void enterSettingsMode()
 {
   previousMode = currentMode;
   currentMode = MODE_SETTINGS;
-  // Serial.println(F("Entered SETTINGS mode"));
+  // Initialize settings submenu state and provide feedback
+  currentSetting = SET_VOLUME;
   playUISound("settings_mode");
 }
 
 void exitSettingsMode()
 {
+  // Apply any changed settings (playback mode selection)
+  saveSettings();
   currentMode = previousMode;
   // Serial.println(F("Exited SETTINGS mode"));
   // play menu close sound if defined
@@ -396,6 +422,54 @@ void playRandomTrack()
     break;
   case MODE_CANDIDS:
     playRandomFromFolder(Candids, NUM_CANDIDS_FILES);
+    break;
+  default:
+    break;
+  }
+}
+
+void playNextTrack()
+{
+  switch (currentMode)
+  {
+  case MODE_VOICE:
+    if (lastPlayedTrack >= NUM_VOICE_FILES)
+      lastPlayedTrack = 0;
+    playFolderTrack(Voice, lastPlayedTrack + 1);
+    break;
+  case MODE_MUSIC:
+    if (lastPlayedTrack >= NUM_MUSIC_FILES)
+      lastPlayedTrack = 0;
+    playFolderTrack(Music, lastPlayedTrack + 1);
+    break;
+  case MODE_CANDIDS:
+    if (lastPlayedTrack >= NUM_CANDIDS_FILES)
+      lastPlayedTrack = 0;
+    playFolderTrack(Candids, lastPlayedTrack + 1);
+    break;
+  default:
+    break;
+  }
+}
+
+void playPreviousTrack()
+{
+  switch (currentMode)
+  {
+  case MODE_VOICE:
+    if (lastPlayedTrack <= 1)
+      lastPlayedTrack = NUM_VOICE_FILES + 1;
+    playFolderTrack(Voice, lastPlayedTrack - 1);
+    break;
+  case MODE_MUSIC:
+    if (lastPlayedTrack <= 1)
+      lastPlayedTrack = NUM_MUSIC_FILES + 1;
+    playFolderTrack(Music, lastPlayedTrack - 1);
+    break;
+  case MODE_CANDIDS:
+    if (lastPlayedTrack <= 1)
+      lastPlayedTrack = NUM_CANDIDS_FILES + 1;
+    playFolderTrack(Candids, lastPlayedTrack - 1);
     break;
   default:
     break;
@@ -505,22 +579,18 @@ void toggleSettingsMode()
 
 void increaseVolume()
 {
-  uint8_t currentVolume = loadVolumeFromEEPROM();
   if (currentVolume < 30) {
     currentVolume++;
     DFPlayer.volume(currentVolume);
-    saveVolumeToEEPROM(currentVolume);
     playFolderTrack(UI, 8); // Play tone1 as feedback
   }
 }
 
 void decreaseVolume()
 {
-  uint8_t currentVolume = loadVolumeFromEEPROM();
   if (currentVolume > 0) {
     currentVolume--;
     DFPlayer.volume(currentVolume);
-    saveVolumeToEEPROM(currentVolume);
     playFolderTrack(UI, 8); // Play tone2 as feedback
   }
 }
@@ -534,7 +604,16 @@ void button1Pressed()
 {
   if (currentMode == MODE_SETTINGS)
   {
-    increaseVolume();
+    // Behavior depends on which setting is currently selected
+    if (currentSetting == SET_VOLUME)
+    {
+      increaseVolume();
+    }
+    else if (currentSetting == SET_PLAYBACK_ORDER_MODE)
+    {
+      currentPlaybackOrderMode = PLAYBACK_ORDER_MODE_SEQUENTIAL;
+      playUISound("sequential_playback");
+    }
     return;
   }
 
@@ -562,7 +641,16 @@ void button2Pressed()
 {
   if (currentMode == MODE_SETTINGS)
   {
-    decreaseVolume();
+    // Behavior depends on which setting is currently selected
+    if (currentSetting == SET_VOLUME)
+    {
+      decreaseVolume();
+    }
+    else if (currentSetting == SET_PLAYBACK_ORDER_MODE)
+    {
+      currentPlaybackOrderMode = PLAYBACK_ORDER_MODE_RANDOM;
+      playUISound("random_playback");
+    }
     return;
   }
 
@@ -586,8 +674,22 @@ void button3Pressed()
   // Button 3 single press behavior varies by mode.
   if (currentMode == MODE_SETTINGS)
   {
-    // In settings mode, keep existing play/pause mapping (togglePlayPause will no-op if inappropriate)
-    togglePlayPause();
+    // In settings mode, cycle through available settings options
+    currentSetting = (SettingsOption)((currentSetting + 1) % SETTING_COUNT);
+    // Provide audio feedback for the newly selected setting
+    switch (currentSetting)
+    {
+    case SET_VOLUME:
+      // Indicate volume selection with a short tone
+      playUISound("settings_volume_mode");
+      break;
+    case SET_PLAYBACK_ORDER_MODE:
+      playUISound("settings_playback_order_mode");
+      break;
+    default:
+      playUISound("settings_mode");
+      break;
+    }
     return;
   }
 
@@ -606,19 +708,25 @@ void button3longPressed()
   toggleSettingsMode();
 }
 
-void saveVolumeToEEPROM(uint8_t volume) {
-  // Write the volume to flash storage. FlashStorage_SAMD handles wear-leveling internally.
-  volumeFlash.write(volume);
+void saveSettings()
+{
+  DeviceSettings s;
+  s.volume = currentVolume;
+  s.playbackOrderMode = currentPlaybackOrderMode;
+  settingsFlash.write(s);
 }
 
-uint8_t loadVolumeFromEEPROM() {
-  // Read the saved value from flash. If uninitialized or out of range, return DEFAULT_VOLUME.
-  uint8_t volume;
-  volumeFlash.read(volume);
-  if (volume > 30) {
-    return DEFAULT_VOLUME;
+DeviceSettings loadSettings() {
+  DeviceSettings s;
+  settingsFlash.read(s);
+  // Validate and provide sensible defaults if uninitialized
+  if (s.volume < 1 || s.volume > 30) {
+    s.volume = DEFAULT_VOLUME;
   }
-  return volume;
+  if (s.playbackOrderMode > PLAYBACK_ORDER_MODE_RANDOM) {
+    s.playbackOrderMode = PLAYBACK_ORDER_MODE_SEQUENTIAL;
+  }
+  return s;
 }
 
 // Serial command handling moved out of loop() for clarity
