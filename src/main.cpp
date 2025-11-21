@@ -4,10 +4,11 @@
 #include <ctype.h>
 #include <FlashStorage_SAMD.h>
 
-#define DEFAULT_VOLUME 20  // Default volume if EEPROM is empty
+#define DEFAULT_VOLUME 20 // Default volume if EEPROM is empty
 
 // Device settings stored in flash (FlashStorage_SAMD)
-struct DeviceSettings {
+struct DeviceSettings
+{
   uint8_t volume;
   uint8_t playbackOrderMode; // stores Mode as uint8_t
   uint8_t reserved;
@@ -52,9 +53,9 @@ struct TrackMapping
 };
 
 // Maximum number of tracks in each folder
-#define NUM_UI_FILES 13      // Number of files in UI folder (01)
+#define NUM_UI_FILES 13     // Number of files in UI folder (01)
 #define NUM_VOICE_FILES 1   // Number of files in Voice folder (02)
-#define NUM_MUSIC_FILES 32   // Number of files in Music folder (03)
+#define NUM_MUSIC_FILES 32  // Number of files in Music folder (03)
 #define NUM_CANDIDS_FILES 1 // Number of files in Candids folder (04)
 
 #define BAUDRATE 115200
@@ -111,7 +112,8 @@ Mode currentMode = MODE_FAVORITES;
 Mode previousMode = MODE_FAVORITES; // used when entering/exiting config
 
 // Settings submenu selection
-enum SettingsOption {
+enum SettingsOption
+{
   SET_VOLUME = 0,
   SET_PLAYBACK_ORDER_MODE = 1,
   SETTING_COUNT
@@ -120,7 +122,7 @@ enum SettingsOption {
 SettingsOption currentSetting = SET_VOLUME;
 Mode settingsPlaybackMode = MODE_FAVORITES; // temporary selection while in settings
 
-int lastPlayedTrack = -1; // last DFPlayer.play() track number
+int lastPlayedTrack = 0; // last DFPlayer.play() track number
 bool isPlaying = false;
 int currentPlaybackOrderMode = PLAYBACK_ORDER_MODE_SEQUENTIAL;
 int currentVolume = DEFAULT_VOLUME;
@@ -201,7 +203,7 @@ void setup()
 
   currentVolume = storedSettings.volume;
   currentPlaybackOrderMode = storedSettings.playbackOrderMode;
-  
+
   DFPlayer.volume(currentVolume); // Set volume value (0~30)
 
   DFPlayer.EQ(DFPLAYER_EQ_NORMAL);
@@ -382,6 +384,8 @@ void enterSettingsMode()
   // Initialize settings submenu state and provide feedback
   currentSetting = SET_VOLUME;
   playUISound("settings_mode");
+  delay(1000);
+  playUISound("settings_volume_mode");
 }
 
 void exitSettingsMode()
@@ -404,10 +408,10 @@ void exitSettingsMode()
     break;
   case MODE_CANDIDS:
     playUISound("candids_mode");
-    break;
   default:
     break;
   }
+  lastPlayedTrack = 0;
 }
 
 void playRandomTrack()
@@ -505,6 +509,7 @@ void changePlaybackMode()
   default:
     break;
   }
+  lastPlayedTrack = 0;
 }
 
 void replayLastTrack()
@@ -579,7 +584,8 @@ void toggleSettingsMode()
 
 void increaseVolume()
 {
-  if (currentVolume < 30) {
+  if (currentVolume < 30)
+  {
     currentVolume++;
     DFPlayer.volume(currentVolume);
     playFolderTrack(UI, 8); // Play tone1 as feedback
@@ -588,7 +594,8 @@ void increaseVolume()
 
 void decreaseVolume()
 {
-  if (currentVolume > 0) {
+  if (currentVolume > 0)
+  {
     currentVolume--;
     DFPlayer.volume(currentVolume);
     playFolderTrack(UI, 8); // Play tone2 as feedback
@@ -624,7 +631,14 @@ void button1Pressed()
   }
 
   // Default behavior for other non-settings modes
-  playRandomTrack();
+  if (currentPlaybackOrderMode == PLAYBACK_ORDER_MODE_SEQUENTIAL)
+  {
+    playNextTrack();
+  }
+  else if (currentPlaybackOrderMode == PLAYBACK_ORDER_MODE_RANDOM)
+  {
+    playRandomTrack();
+  }
 }
 
 void button1longPressed()
@@ -661,7 +675,14 @@ void button2Pressed()
   }
 
   // Default behavior for other non-settings modes
-  replayLastTrack();
+  if (currentPlaybackOrderMode == PLAYBACK_ORDER_MODE_SEQUENTIAL)
+  {
+    playPreviousTrack();
+  }
+  else if (currentPlaybackOrderMode == PLAYBACK_ORDER_MODE_RANDOM)
+  {
+    replayLastTrack();
+  }
 }
 
 void button3ISR()
@@ -716,14 +737,17 @@ void saveSettings()
   settingsFlash.write(s);
 }
 
-DeviceSettings loadSettings() {
+DeviceSettings loadSettings()
+{
   DeviceSettings s;
   settingsFlash.read(s);
   // Validate and provide sensible defaults if uninitialized
-  if (s.volume < 1 || s.volume > 30) {
+  if (s.volume < 1 || s.volume > 30)
+  {
     s.volume = DEFAULT_VOLUME;
   }
-  if (s.playbackOrderMode > PLAYBACK_ORDER_MODE_RANDOM) {
+  if (s.playbackOrderMode > PLAYBACK_ORDER_MODE_RANDOM)
+  {
     s.playbackOrderMode = PLAYBACK_ORDER_MODE_SEQUENTIAL;
   }
   return s;
